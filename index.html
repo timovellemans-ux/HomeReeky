@@ -481,8 +481,12 @@
             display: none;
         }
     </style>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script lang="javascript">
         document.addEventListener("DOMContentLoaded", () => {
+            const supabaseUrl = "https://byiurbihafbaefffmbpq.supabase.co";
+            const supabaseKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJ5aXVyYmloYWZiYWVmZmZtYnBxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkzMDEzODAsImV4cCI6MjEwNDg3NzM4MH0.K5hcAQxxOHV6NPuK--yQ_N0unc5WrpkpyiuQDxDDA5Y";
+            const supabaseClient = window.supabase.createClient(supabaseUrl, supabaseKey);
             const startBtn = document.getElementById("startBtn");
             const authPanel = document.getElementById("authPanel");
             const accountInfo = document.getElementById("accountInfo");
@@ -533,7 +537,9 @@
             const requiredCorrect = 5;
             let correctCount = 0;
             let authMode = "login";
-            let currentUsername = localStorage.getItem("mathQuizCurrentUser");
+            let currentUsername = null;
+            let currentProfile = null;
+            let coinRainActive = false;
             let currentView = "home";
             const shopItems = [
                 { id: "blue-shirt", name: "Blue shirt", price: 5, type: "shirt", value: "#3b82f6" },
@@ -551,27 +557,50 @@
                 localStorage.setItem("mathQuizUsers", JSON.stringify(users));
             }
 
-            function getMultiplier() {
-                return Number(localStorage.getItem("mathQuizMultiplier") || "1");
-            }
-
-            function showMultiplier() {
-                multiplierStatus.textContent = `Current exercise reward: ${getMultiplier()}x coins`;
-            }
-
-            function addCoins(amount) {
-                const users = getUsers();
-                const user = users[currentUsername];
+            async function loadRemoteProfile() {
+                const { data: { user } } = await supabaseClient.auth.getUser();
                 if (!user) {
+                    currentUsername = null;
+                    currentProfile = null;
                     return;
                 }
-                user.coins += amount;
-                saveUsers(users);
+
+                const { data: profile } = await supabaseClient
+                    .from("profiles")
+                    .select("id, username, coins, character, role")
+                    .eq("id", user.id)
+                    .single();
+                currentProfile = profile;
+                currentUsername = profile ? profile.username : null;
+            }
+
+            async function loadGameEvent() {
+                const { data } = await supabaseClient
+                    .from("game_events")
+                    .select("coin_rain_active, multiplier")
+                    .eq("id", true)
+                    .single();
+                if (data) {
+                    coinRainActive = data.coin_rain_active;
+                    multiplierSelect.value = String(data.multiplier);
+                    multiplierStatus.textContent = `Current exercise reward: ${data.multiplier}x coins`;
+                }
+            }
+
+            async function addCoins(amount) {
+                if (!currentProfile) {
+                    return;
+                }
+                const { error } = await supabaseClient.rpc("claim_coin_rain");
+                if (error) {
+                    return;
+                }
+                await loadRemoteProfile();
                 updateAccountView();
             }
 
             function spawnCoin() {
-                if (localStorage.getItem("mathQuizCoinEvent") !== "active") {
+                if (!coinRainActive) {
                     return;
                 }
 
@@ -580,9 +609,9 @@
                 coin.type = "button";
                 coin.textContent = "+5";
                 coin.style.left = `${Math.random() * 94}vw`;
-                coin.addEventListener("click", () => {
-                    if (localStorage.getItem("mathQuizCoinEvent") === "active") {
-                        addCoins(5);
+                coin.addEventListener("click", async () => {
+                    if (coinRainActive) {
+                        await addCoins(5);
                         coin.remove();
                     }
                 });
@@ -590,16 +619,33 @@
                 coinRain.appendChild(coin);
             }
 
-            function startCoinEvent() {
-                localStorage.setItem("mathQuizCoinEvent", "active");
+            async function startCoinEvent() {
+                await supabaseClient.rpc("set_game_event", {
+                    coin_rain: true,
+                    new_multiplier: currentProfile ? await getRemoteMultiplier() : 1
+                });
+                coinRainActive = true;
                 adminMessage.textContent = "Coin rain event gestart.";
                 spawnCoin();
             }
 
-            function stopCoinEvent() {
-                localStorage.setItem("mathQuizCoinEvent", "inactive");
+            async function stopCoinEvent() {
+                await supabaseClient.rpc("set_game_event", {
+                    coin_rain: false,
+                    new_multiplier: await getRemoteMultiplier()
+                });
+                coinRainActive = false;
                 coinRain.innerHTML = "";
                 adminMessage.textContent = "Coin rain event gestopt.";
+            }
+
+            async function getRemoteMultiplier() {
+                const { data } = await supabaseClient
+                    .from("game_events")
+                    .select("multiplier")
+                    .eq("id", true)
+                    .single();
+                return data ? data.multiplier : 1;
             }
 
             function ensureCharacter(user) {
@@ -793,38 +839,47 @@
             });
 
             function isAdmin() {
-                return currentUsername === "CyberTimo1234";
+                return currentProfile && currentProfile.role === "admin";
             }
 
-            function showAnnouncement() {
-                const announcement = localStorage.getItem("mathQuizAnnouncement");
-                announcementEl.textContent = announcement || "";
+            async function showAnnouncement() {
+                const { data } = await supabaseClient
+                    .from("announcements")
+                    .select("message")
+                    .order("created_at", { ascending: false })
+                    .limit(1)
+                    .maybeSingle();
+                const announcement = data ? data.message : "";
+                announcementEl.textContent = announcement;
                 announcementEl.classList.toggle("hidden", !announcement);
             }
 
-            function updateCoinUsers() {
-                const users = getUsers();
+            async function updateCoinUsers() {
+                const { data: users } = await supabaseClient
+                    .from("profiles")
+                    .select("username")
+                    .order("username");
                 coinUserSelect.innerHTML = "";
-                Object.keys(users).forEach(username => {
+                (users || []).forEach(user => {
                     const option = document.createElement("option");
-                    option.value = username;
-                    option.textContent = username;
+                    option.value = user.username;
+                    option.textContent = user.username;
                     coinUserSelect.appendChild(option);
                 });
             }
 
-            function openAdminPanel() {
+            async function openAdminPanel() {
                 if (!isAdmin()) {
                     return;
                 }
-                updateCoinUsers();
+                await updateCoinUsers();
                 adminMessage.textContent = "";
                 adminOverlay.classList.remove("hidden");
             }
 
             function updateAccountView() {
                 const users = getUsers();
-                const user = currentUsername ? users[currentUsername] : null;
+                const user = currentProfile || (currentUsername ? users[currentUsername] : null);
                 const isLoggedIn = Boolean(user);
 
                 authPanel.classList.toggle("hidden", isLoggedIn);
@@ -850,32 +905,35 @@
                 authMessage.textContent = "";
             }
 
-            authForm.addEventListener("submit", (event) => {
+            authForm.addEventListener("submit", async (event) => {
                 event.preventDefault();
                 const username = usernameInput.value.trim();
+                const email = document.getElementById("email").value.trim();
                 const password = passwordInput.value;
-                const users = getUsers();
 
-                if (username.length < 2 || password.length < 4) {
-                    authMessage.textContent = "Gebruik minstens 2 tekens voor je naam en 4 voor je wachtwoord.";
+                if (username.length < 2 || !email || password.length < 4) {
+                    authMessage.textContent = "Vul een gebruikersnaam, e-mailadres en wachtwoord in.";
                     return;
                 }
 
+                let result;
                 if (authMode === "register") {
-                    if (users[username]) {
-                        authMessage.textContent = "Deze gebruikersnaam bestaat al.";
-                        return;
-                    }
-                    users[username] = { password, coins: 0 };
-                } else if (!users[username] || users[username].password !== password) {
-                    authMessage.textContent = "Gebruikersnaam of wachtwoord is niet juist.";
+                    result = await supabaseClient.auth.signUp({
+                        email,
+                        password,
+                        options: { data: { username } }
+                    });
+                } else {
+                    result = await supabaseClient.auth.signInWithPassword({ email, password });
+                }
+
+                if (result.error) {
+                    authMessage.textContent = result.error.message;
                     return;
                 }
 
-                saveUsers(users);
-                currentUsername = username;
-                localStorage.setItem("mathQuizCurrentUser", currentUsername);
                 authForm.reset();
+                await loadRemoteProfile();
                 updateAccountView();
                 showAnnouncement();
                 shopMessage.textContent = "";
@@ -885,9 +943,10 @@
                 setAuthMode(authMode === "login" ? "register" : "login");
             });
 
-            logoutBtn.addEventListener("click", () => {
+            logoutBtn.addEventListener("click", async () => {
+                await supabaseClient.auth.signOut();
                 currentUsername = null;
-                localStorage.removeItem("mathQuizCurrentUser");
+                currentProfile = null;
                 updateAccountView();
             });
 
@@ -907,19 +966,28 @@
                 }
             });
 
-            coinForm.addEventListener("submit", (event) => {
+            coinForm.addEventListener("submit", async (event) => {
                 event.preventDefault();
-                const users = getUsers();
                 const username = coinUserSelect.value;
                 const amount = Number(coinAmountInput.value);
 
-                if (!isAdmin() || !users[username] || !Number.isInteger(amount) || amount < 1) {
+                if (!isAdmin() || !Number.isInteger(amount) || amount < 1) {
                     adminMessage.textContent = "Kies een gebruiker en een geldig aantal coins.";
                     return;
                 }
 
-                users[username].coins += amount;
-                saveUsers(users);
+                const { data: target } = await supabaseClient
+                    .from("profiles")
+                    .select("id")
+                    .eq("username", username)
+                    .single();
+                const { error } = target
+                    ? await supabaseClient.rpc("add_coins", { target_user: target.id, amount })
+                    : { error: new Error("User not found") };
+                if (error) {
+                    adminMessage.textContent = error.message;
+                    return;
+                }
                 updateAccountView();
                 adminMessage.textContent = `${amount} coin(s) gegeven aan ${username}.`;
                 coinAmountInput.value = "1";
@@ -928,16 +996,23 @@
             startCoinEventBtn.addEventListener("click", startCoinEvent);
             stopCoinEventBtn.addEventListener("click", stopCoinEvent);
 
-            setMultiplierBtn.addEventListener("click", () => {
+            setMultiplierBtn.addEventListener("click", async () => {
                 if (!isAdmin()) {
                     return;
                 }
-                localStorage.setItem("mathQuizMultiplier", multiplierSelect.value);
-                showMultiplier();
+                const { error } = await supabaseClient.rpc("set_game_event", {
+                    coin_rain: coinRainActive,
+                    new_multiplier: Number(multiplierSelect.value)
+                });
+                if (error) {
+                    adminMessage.textContent = error.message;
+                    return;
+                }
+                await loadGameEvent();
                 adminMessage.textContent = `Oefeningen geven nu ${multiplierSelect.value}x coins.`;
             });
 
-            announcementForm.addEventListener("submit", (event) => {
+            announcementForm.addEventListener("submit", async (event) => {
                 event.preventDefault();
                 const announcement = announcementInput.value.trim();
 
@@ -946,8 +1021,15 @@
                     return;
                 }
 
-                localStorage.setItem("mathQuizAnnouncement", announcement);
-                showAnnouncement();
+                const { error } = await supabaseClient.from("announcements").insert({
+                    message: announcement,
+                    created_by: (await supabaseClient.auth.getUser()).data.user.id
+                });
+                if (error) {
+                    adminMessage.textContent = error.message;
+                    return;
+                }
+                await showAnnouncement();
                 announcementForm.reset();
                 adminMessage.textContent = "Aankondiging geplaatst.";
             });
@@ -1008,13 +1090,17 @@
                 q.options.forEach(option => {
                     const btn = document.createElement("button");
                     btn.textContent = option;
-                    btn.addEventListener("click", () => {
+                    btn.addEventListener("click", async () => {
                         const buttons = answersEl.querySelectorAll("button");
                         buttons.forEach(b => b.disabled = true);
                         if (option === q.answer) {
                             btn.classList.add("correct");
                             correctCount++;
-                            addCoins(getMultiplier());
+                            const { error } = await supabaseClient.rpc("claim_correct_answer");
+                            if (!error) {
+                                await loadRemoteProfile();
+                                updateAccountView();
+                            }
                         } else {
                             btn.classList.add("wrong");
                             buttons.forEach(b => {
@@ -1051,18 +1137,32 @@
                 overlay.classList.add("hidden");
             });
 
-            window.addEventListener("storage", () => {
-                showMultiplier();
-                if (localStorage.getItem("mathQuizCoinEvent") !== "active") {
+            window.addEventListener("storage", async () => {
+                await loadGameEvent();
+                if (!coinRainActive) {
                     coinRain.innerHTML = "";
                 }
             });
 
-            showMultiplier();
+            loadGameEvent();
             setInterval(spawnCoin, 700);
 
-            updateAccountView();
-            showAnnouncement();
+            supabaseClient
+                .channel("global-game-updates")
+                .on("postgres_changes", { event: "*", schema: "public", table: "game_events" }, loadGameEvent)
+                .on("postgres_changes", { event: "INSERT", schema: "public", table: "announcements" }, showAnnouncement)
+                .on("postgres_changes", { event: "UPDATE", schema: "public", table: "profiles" }, async payload => {
+                    if (currentProfile && payload.new.id === currentProfile.id) {
+                        await loadRemoteProfile();
+                        updateAccountView();
+                    }
+                })
+                .subscribe();
+
+            loadRemoteProfile().then(() => {
+                updateAccountView();
+                showAnnouncement();
+            });
         });
     </script>
 </head>
@@ -1073,6 +1173,7 @@
         <h2 id="authTitle">Inloggen</h2>
         <form id="authForm">
             <input id="username" type="text" placeholder="Gebruikersnaam" autocomplete="username" required>
+            <input id="email" type="email" placeholder="E-mailadres" autocomplete="email" required>
             <input id="password" type="password" placeholder="Wachtwoord" autocomplete="current-password" required>
             <button id="authSubmit" type="submit">Inloggen</button>
         </form>
